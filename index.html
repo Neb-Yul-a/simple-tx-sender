@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Simple Ethereum Tx Sender</title>
+    <!-- Ethers.js v6 UMD CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/ethers@6.6.2/dist/ethers.umd.min.js"></script>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 2rem;
+      }
+      label {
+        display: block;
+        margin: 0.5rem 0;
+      }
+      input,
+      textarea,
+      select {
+        width: 100%;
+        padding: 0.5rem;
+        margin-top: 0.2rem;
+        font-family: monospace;
+      }
+      textarea {
+        resize: vertical;
+      }
+      button {
+        padding: 0.6rem 1.2rem;
+        margin-top: 1rem;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      #status,
+      #txStatus {
+        margin-top: 1rem;
+        white-space: pre-wrap;
+      }
+      #fileWarning {
+        background: #ffdddd;
+        padding: 1rem;
+        border: 1px solid #dd0000;
+        margin-bottom: 1rem;
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="fileWarning">
+      ⚠️ Serve over HTTP/HTTPS for wallet integration.<br />
+      Run in your folder:<br />
+      <code>python3 -m http.server 8000</code><br />
+      and open <code>http://localhost:8000/index.html</code>.
+    </div>
+
+    <!-- Wallet selection if multiple providers detected -->
+    <div id="providerSelectContainer" style="display: none">
+      <label for="providerSelect"
+        >Select Wallet:
+        <select id="providerSelect"></select>
+      </label>
+    </div>
+
+    <button id="connectButton">Connect Wallet</button>
+    <div id="status">Not connected</div>
+
+    <label>
+      To:
+      <input type="text" id="toInput" placeholder="0x..." />
+    </label>
+    <label>
+      Value (ETH):
+      <input type="text" id="valueInput" placeholder="0.0" />
+    </label>
+    <label>
+      Calldata (hex):
+      <textarea
+        id="dataInput"
+        rows="10"
+        placeholder="자동 설정 (빈칸 = ETH transfer)"
+      ></textarea>
+    </label>
+    <label>
+      Nonce (optional):
+      <input type="text" id="nonceInput" placeholder="자동 설정" />
+    </label>
+
+    <button id="sendButton" disabled>Send Tx</button>
+    <div id="txStatus"></div>
+
+    <script>
+      // Populate wallet providers if multiple
+      const providerSelectContainer = document.getElementById(
+        "providerSelectContainer",
+      );
+      const providerSelect = document.getElementById("providerSelect");
+      if (
+        window.ethereum &&
+        Array.isArray(window.ethereum.providers) &&
+        window.ethereum.providers.length > 1
+      ) {
+        const list = window.ethereum.providers;
+        list.forEach((p, idx) => {
+          let name = "Provider " + idx;
+          if (p.isMetaMask) name = "MetaMask";
+          else if (p.isFrame) name = "Frame";
+          else if (p.isOkxWallet || p.isOKXWallet) name = "OKX Wallet";
+          const opt = document.createElement("option");
+          opt.value = idx;
+          opt.textContent = name;
+          providerSelect.appendChild(opt);
+        });
+        providerSelectContainer.style.display = "block";
+      }
+
+      // Utility to get the selected provider
+      function getProvider() {
+        if (
+          window.ethereum &&
+          Array.isArray(window.ethereum.providers) &&
+          window.ethereum.providers.length > 1
+        ) {
+          const idx = parseInt(providerSelect.value || "0", 10);
+          return window.ethereum.providers[idx];
+        }
+        return window.ethereum || null;
+      }
+
+      const connectButton = document.getElementById("connectButton");
+      const sendButton = document.getElementById("sendButton");
+      const status = document.getElementById("status");
+      const txStatus = document.getElementById("txStatus");
+
+      let ethProvider = null;
+      let signer = null;
+      let userAddress = null;
+
+      // Warn if loaded via file://
+      if (location.protocol === "file:") {
+        document.getElementById("fileWarning").style.display = "block";
+        connectButton.disabled = true;
+        sendButton.disabled = true;
+      }
+
+      if (typeof ethers === "undefined") {
+        alert("Ethers.js failed to load.");
+        console.error("Ethers.js undefined");
+      }
+
+      // Connect / Disconnect
+      connectButton.onclick = async () => {
+        if (connectButton.textContent === "Connect Wallet") {
+          ethProvider = getProvider();
+          if (!ethProvider) return alert("No wallet found.");
+          try {
+            // Request account access
+            if (ethProvider.request)
+              await ethProvider.request({ method: "eth_requestAccounts" });
+            else if (ethProvider.enable) await ethProvider.enable();
+            const ethersProvider = new ethers.BrowserProvider(ethProvider);
+            signer = await ethersProvider.getSigner();
+            userAddress = await signer.getAddress();
+
+            status.textContent = "Connected: " + userAddress;
+            connectButton.textContent = "Connected";
+            sendButton.disabled = false;
+          } catch (err) {
+            console.error(err);
+            status.textContent = "Connection failed: " + (err.message || err);
+          }
+        } else {
+          // Disconnect
+          ethProvider = null;
+          signer = null;
+          userAddress = null;
+          status.textContent = "Not connected";
+          connectButton.textContent = "Connect Wallet";
+          sendButton.disabled = true;
+          txStatus.textContent = "";
+        }
+      };
+
+      // Send transaction via eth_sendTransaction
+      sendButton.onclick = async () => {
+        if (!signer || !ethProvider || !userAddress) {
+          return alert("Please connect your wallet first.");
+        }
+
+        let to = document.getElementById("toInput").value.trim();
+        const data = document.getElementById("dataInput").value.trim();
+        const valueEth = document.getElementById("valueInput").value.trim();
+        const nonceVal = document.getElementById("nonceInput").value.trim();
+
+        if (!ethers.isAddress(to)) {
+          txStatus.textContent = "Error: Invalid To address";
+          return;
+        }
+
+        let valueBig;
+        try {
+          valueBig = ethers.parseEther(valueEth || "0");
+        } catch {
+          txStatus.textContent = "Error: Invalid value";
+          return;
+        }
+
+        const txParams = {
+          from: userAddress,
+          to: to,
+          value: "0x" + valueBig.toString(16),
+        };
+        if (data) txParams.data = data;
+        if (nonceVal) {
+          const n = parseInt(nonceVal, 10);
+          if (isNaN(n) || n < 0) {
+            txStatus.textContent = "Error: Invalid nonce";
+            return;
+          }
+          txParams.nonce = "0x" + BigInt(n).toString(16);
+        }
+
+        console.log("Sending txParams:", txParams);
+        sendButton.disabled = true;
+        txStatus.textContent = "Awaiting approval...";
+
+        try {
+          const txHash = await ethProvider.request({
+            method: "eth_sendTransaction",
+            params: [txParams],
+          });
+          txStatus.innerHTML =
+            'Tx hash: <a href="https://etherscan.io/tx/' +
+            txHash +
+            '" target="_blank">' +
+            txHash +
+            "</a>";
+        } catch (err) {
+          console.error(err);
+          txStatus.textContent = "Error: " + (err.message || err);
+        } finally {
+          sendButton.disabled = false;
+        }
+      };
+    </script>
+  </body>
+</html>
