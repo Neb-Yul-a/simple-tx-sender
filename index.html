@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Simple Ethereum Tx Sender</title>
     <!-- Ethers.js v6 UMD CDN -->
-    <script src="https://cdn.jsdelivr.net/npm/ethers@6.6.2/dist/ethers.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.15.0/ethers.umd.min.js"></script>
     <style>
       body {
         font-family: Arial, sans-serif;
@@ -40,23 +40,25 @@
         margin-top: 1rem;
         white-space: pre-wrap;
       }
-      #fileWarning {
-        background: #ffdddd;
-        padding: 1rem;
-        border: 1px solid #dd0000;
-        margin-bottom: 1rem;
-        display: none;
+      .row {
+        display: flex;
+        gap: 1rem;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .row > * {
+        flex: 1 1 auto;
+      }
+      .muted {
+        color: #666;
+        font-size: 0.9em;
+      }
+      #signedBox {
+        margin-top: 1rem;
       }
     </style>
   </head>
   <body>
-    <div id="fileWarning">
-      ⚠️ Serve over HTTP/HTTPS for wallet integration.<br />
-      Run in your folder:<br />
-      <code>python3 -m http.server 8000</code><br />
-      and open <code>http://localhost:8000/index.html</code>.
-    </div>
-
     <!-- Wallet selection if multiple providers detected -->
     <div id="providerSelectContainer" style="display: none">
       <label for="providerSelect"
@@ -65,8 +67,10 @@
       </label>
     </div>
 
-    <button id="connectButton">Connect Wallet</button>
-    <div id="status">Not connected</div>
+    <div class="row">
+      <button id="connectButton">Connect Wallet</button>
+      <div id="status">Not connected</div>
+    </div>
 
     <label>
       To:
@@ -89,8 +93,39 @@
       <input type="text" id="nonceInput" placeholder="자동 설정" />
     </label>
 
-    <button id="sendButton" disabled>Send Tx</button>
+    <div class="row">
+      <button id="sendButton" disabled>Send Tx</button>
+      <button id="signButton" disabled>Sign Tx (no send)</button>
+    </div>
+
+    <div class="row">
+      <label style="flex: 1"
+        >Max Priority Fee (gwei, optional)
+        <input type="text" id="mpgInput" placeholder="0 = auto" />
+      </label>
+      <label style="flex: 1"
+        >Max Fee (gwei, optional)
+        <input type="text" id="mfgInput" placeholder="0 = auto" />
+      </label>
+    </div>
+
     <div id="txStatus"></div>
+
+    <div id="signedBox" style="display: none">
+      <label>
+        Signed Raw Tx (hex):
+        <textarea id="signedOutput" rows="4" readonly></textarea>
+      </label>
+      <div class="row">
+        <button id="copySigned" style="flex: 0 0 auto">Copy</button>
+        <div id="signedHash" class="muted"></div>
+      </div>
+      <div class="muted">
+        Note: Some wallets (e.g. MetaMask extension) do not support
+        <code>eth_signTransaction</code>. In that case, try Frame/OKX/Rabby or a
+        wallet that supports sign-only.
+      </div>
+    </div>
 
     <script>
       // Populate wallet providers if multiple
@@ -132,19 +167,21 @@
 
       const connectButton = document.getElementById("connectButton");
       const sendButton = document.getElementById("sendButton");
+      const signButton = document.getElementById("signButton");
       const status = document.getElementById("status");
       const txStatus = document.getElementById("txStatus");
+      const signedBox = document.getElementById("signedBox");
+      const signedOutput = document.getElementById("signedOutput");
+      const copySigned = document.getElementById("copySigned");
+      const signedHash = document.getElementById("signedHash");
+
+      const mpgInput = document.getElementById("mpgInput");
+      const mfgInput = document.getElementById("mfgInput");
 
       let ethProvider = null;
+      let rpcProvider = null; // ethers.BrowserProvider
       let signer = null;
       let userAddress = null;
-
-      // Warn if loaded via file://
-      if (location.protocol === "file:") {
-        document.getElementById("fileWarning").style.display = "block";
-        connectButton.disabled = true;
-        sendButton.disabled = true;
-      }
 
       if (typeof ethers === "undefined") {
         alert("Ethers.js failed to load.");
@@ -157,77 +194,150 @@
           ethProvider = getProvider();
           if (!ethProvider) return alert("No wallet found.");
           try {
-            // Request account access
             if (ethProvider.request)
               await ethProvider.request({ method: "eth_requestAccounts" });
             else if (ethProvider.enable) await ethProvider.enable();
-            const ethersProvider = new ethers.BrowserProvider(ethProvider);
-            signer = await ethersProvider.getSigner();
+            rpcProvider = new ethers.BrowserProvider(ethProvider);
+            signer = await rpcProvider.getSigner();
             userAddress = await signer.getAddress();
 
             status.textContent = "Connected: " + userAddress;
             connectButton.textContent = "Connected";
             sendButton.disabled = false;
+            signButton.disabled = false;
           } catch (err) {
             console.error(err);
             status.textContent = "Connection failed: " + (err.message || err);
           }
         } else {
-          // Disconnect
           ethProvider = null;
+          rpcProvider = null;
           signer = null;
           userAddress = null;
           status.textContent = "Not connected";
           connectButton.textContent = "Connect Wallet";
           sendButton.disabled = true;
+          signButton.disabled = true;
           txStatus.textContent = "";
+          signedBox.style.display = "none";
+          signedOutput.value = "";
+          signedHash.textContent = "";
         }
       };
 
-      // Send transaction via eth_sendTransaction
-      sendButton.onclick = async () => {
-        if (!signer || !ethProvider || !userAddress) {
-          return alert("Please connect your wallet first.");
-        }
+      function aliasToAddress(input) {
+        return input;
+      }
 
-        let to = document.getElementById("toInput").value.trim();
+      function toHex(bn) {
+        return "0x" + bn.toString(16);
+      }
+
+      async function buildBaseTxParams() {
+        if (!signer || !ethProvider || !rpcProvider || !userAddress)
+          throw new Error("Connect first");
+        let to = aliasToAddress(
+          document.getElementById("toInput").value.trim(),
+        );
         const data = document.getElementById("dataInput").value.trim();
         const valueEth = document.getElementById("valueInput").value.trim();
         const nonceVal = document.getElementById("nonceInput").value.trim();
 
-        if (!ethers.isAddress(to)) {
-          txStatus.textContent = "Error: Invalid To address";
-          return;
-        }
-
+        if (!ethers.isAddress(to)) throw new Error("Invalid To address");
         let valueBig;
         try {
           valueBig = ethers.parseEther(valueEth || "0");
         } catch {
-          txStatus.textContent = "Error: Invalid value";
-          return;
+          throw new Error("Invalid value");
         }
 
-        const txParams = {
-          from: userAddress,
-          to: to,
-          value: "0x" + valueBig.toString(16),
-        };
-        if (data) txParams.data = data;
+        const base = { from: userAddress, to, value: toHex(valueBig) };
+        if (data) base.data = data;
+
+        // Nonce
         if (nonceVal) {
           const n = parseInt(nonceVal, 10);
-          if (isNaN(n) || n < 0) {
-            txStatus.textContent = "Error: Invalid nonce";
-            return;
-          }
-          txParams.nonce = "0x" + BigInt(n).toString(16);
+          if (isNaN(n) || n < 0) throw new Error("Invalid nonce");
+          base.nonce = toHex(BigInt(n));
+        } else {
+          const n = await rpcProvider.getTransactionCount(
+            userAddress,
+            "latest",
+          );
+          base.nonce = toHex(BigInt(n));
         }
 
-        console.log("Sending txParams:", txParams);
-        sendButton.disabled = true;
-        txStatus.textContent = "Awaiting approval...";
+        // Gas & Fees
+        const estimate = await rpcProvider.estimateGas({
+          from: userAddress,
+          to,
+          data,
+          value: valueBig,
+        });
+        base.gas = toHex(estimate);
 
+        // User-specified EIP-1559 fees in gwei (0 or empty -> auto)
+        const mpgStr = (mpgInput.value || "").trim();
+        const mfgStr = (mfgInput.value || "").trim();
+        const userMpg =
+          mpgStr && mpgStr !== "0" ? ethers.parseUnits(mpgStr, "gwei") : null;
+        const userMfg =
+          mfgStr && mfgStr !== "0" ? ethers.parseUnits(mfgStr, "gwei") : null;
+
+        const fee = await rpcProvider.getFeeData();
+        const maxPriorityWei = userMpg ?? fee.maxPriorityFeePerGas ?? null;
+        const maxFeeWei = userMfg ?? fee.maxFeePerGas ?? null;
+
+        if (maxPriorityWei && maxFeeWei) {
+          base.type = "0x2";
+          base.maxPriorityFeePerGas = toHex(maxPriorityWei);
+          base.maxFeePerGas = toHex(maxFeeWei);
+        } else if (fee.gasPrice) {
+          base.gasPrice = toHex(fee.gasPrice);
+        }
+
+        const net = await rpcProvider.getNetwork();
+        base.chainId = toHex(net.chainId);
+
+        // Optional: access list (best-effort)
         try {
+          const { accessList } = await ethProvider.request({
+            method: "eth_createAccessList",
+            params: [
+              {
+                from: base.from,
+                to: base.to,
+                value: base.value,
+                data: base.data,
+              },
+              "latest",
+            ],
+          });
+          if (Array.isArray(accessList)) {
+            const toAddr = base.to.toLowerCase();
+            const idx = accessList.findIndex(
+              (e) => (e.address || "").toLowerCase() === toAddr,
+            );
+            if (idx !== -1 && accessList[idx].storageKeys.length <= 24)
+              accessList.splice(idx, 1);
+            if (base.type === "0x2") base.accessList = accessList;
+          }
+        } catch (_) {
+          /* ignore */
+        }
+
+        return base;
+      }
+
+      // Send transaction via eth_sendTransaction (unchanged)
+      sendButton.onclick = async () => {
+        if (!signer || !ethProvider || !userAddress)
+          return alert("Please connect your wallet first.");
+        try {
+          const txParams = await buildBaseTxParams();
+          console.log("Sending txParams:", txParams);
+          sendButton.disabled = true;
+          txStatus.textContent = "Awaiting approval...";
           const txHash = await ethProvider.request({
             method: "eth_sendTransaction",
             params: [txParams],
@@ -244,6 +354,91 @@
         } finally {
           sendButton.disabled = false;
         }
+      };
+
+      // Sign transaction only (no send)
+      signButton.onclick = async () => {
+        if (!signer || !ethProvider || !userAddress)
+          return alert("Please connect your wallet first.");
+        signedBox.style.display = "none";
+        signedOutput.value = "";
+        signedHash.textContent = "";
+        try {
+          const txParams = await buildBaseTxParams();
+          console.log("Signing txParams:", txParams);
+          signButton.disabled = true;
+          txStatus.textContent = "Requesting signature...";
+
+          let rawResp;
+          try {
+            // Preferred: direct RPC (works on Frame/OKX/Rabby; MetaMask may not support)
+            rawResp = await ethProvider.request({
+              method: "eth_signTransaction",
+              params: [txParams],
+            });
+          } catch (e1) {
+            // Fallback to signer.signTransaction if available
+            if (signer && typeof signer.signTransaction === "function") {
+              const populated = await signer.populateTransaction({
+                to: txParams.to,
+                data: txParams.data,
+                value: txParams.value,
+                nonce: parseInt(txParams.nonce, 16),
+                gasLimit: parseInt(txParams.gas, 16),
+                maxFeePerGas: txParams.maxFeePerGas,
+                maxPriorityFeePerGas: txParams.maxPriorityFeePerGas,
+                gasPrice: txParams.gasPrice,
+                type: txParams.type ? Number(txParams.type) : undefined,
+                chainId: parseInt(txParams.chainId, 16),
+                accessList: txParams.accessList,
+              });
+              rawResp = await signer.signTransaction(populated);
+            } else {
+              throw new Error(
+                e1 && e1.message
+                  ? e1.message +
+                    " — Your wallet may not support sign-only. Try Frame/OKX/Rabby or a wallet that supports eth_signTransaction."
+                  : "Wallet does not support sign-only signing",
+              );
+            }
+          }
+
+          // Normalize response to hex string
+          let rawHex = "";
+          if (typeof rawResp === "string") rawHex = rawResp;
+          else if (rawResp && typeof rawResp === "object")
+            rawHex = rawResp.signedTx || rawResp.raw || rawResp.tx || "";
+          if (
+            !rawHex ||
+            typeof rawHex !== "string" ||
+            !rawHex.startsWith("0x")
+          ) {
+            // Still show diagnostic but do not crash
+            throw new Error(
+              "Wallet returned unexpected format for signed tx. Inspect console.",
+            );
+          }
+
+          const hash = ethers.keccak256(rawHex);
+          signedOutput.value = rawHex;
+          signedHash.textContent =
+            "Tx hash (keccak of signed raw): " + hash + " — not broadcasted";
+          signedBox.style.display = "block";
+          txStatus.textContent =
+            "Signed only. Save the raw hex to broadcast later.";
+        } catch (err) {
+          console.error(err);
+          txStatus.textContent = "Sign error: " + (err.message || err);
+        } finally {
+          signButton.disabled = false;
+        }
+      };
+
+      copySigned.onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(signedOutput.value.trim());
+          signedHash.textContent += "  — Copied";
+        } catch (_) {}
       };
     </script>
   </body>
