@@ -226,6 +226,7 @@
       };
 
       function aliasToAddress(input) {
+        if (!input) return input;
         return input;
       }
 
@@ -243,7 +244,7 @@
         const valueEth = document.getElementById("valueInput").value.trim();
         const nonceVal = document.getElementById("nonceInput").value.trim();
 
-        if (!ethers.isAddress(to)) throw new Error("Invalid To address");
+        if (to && !ethers.isAddress(to)) throw new Error("Invalid To address");
         let valueBig;
         try {
           valueBig = ethers.parseEther(valueEth || "0");
@@ -260,21 +261,16 @@
           if (isNaN(n) || n < 0) throw new Error("Invalid nonce");
           base.nonce = toHex(BigInt(n));
         } else {
-          const n = await rpcProvider.getTransactionCount(
-            userAddress,
-            "latest",
-          );
-          base.nonce = toHex(BigInt(n));
+          //const n = await rpcProvider.getTransactionCount(
+          //  userAddress,
+          //  "latest",
+          //);
+          //base.nonce = toHex(BigInt(n)); //set undefined
         }
 
-        // Gas & Fees
-        const estimate = await rpcProvider.estimateGas({
-          from: userAddress,
-          to,
-          data,
-          value: valueBig,
-        });
-        base.gas = toHex(estimate);
+        // Gas & Fees; remove gasEstimation. relying on wallets
+        const eGasParams = { from: userAddress, data, value: valueBig };
+        if (to) eGasParams.to = to;
 
         // User-specified EIP-1559 fees in gwei (0 or empty -> auto)
         const mpgStr = (mpgInput.value || "").trim();
@@ -284,16 +280,82 @@
         const userMfg =
           mfgStr && mfgStr !== "0" ? ethers.parseUnits(mfgStr, "gwei") : null;
 
-        const fee = await rpcProvider.getFeeData();
-        const maxPriorityWei = userMpg ?? fee.maxPriorityFeePerGas ?? null;
-        const maxFeeWei = userMfg ?? fee.maxFeePerGas ?? null;
+        let maxPriorityWei = userMpg;
+        let maxFeeWei = userMfg;
 
-        if (maxPriorityWei && maxFeeWei) {
+        let computedBaseFee = null;
+        let useEip1559 = false;
+
+        if (maxPriorityWei && maxFeeWei && userMpg && userMfg) {
+          useEip1559 = true;
+        }
+
+        if (!maxPriorityWei || !maxFeeWei) {
+          try {
+            const feeHistory = await rpcProvider.send("eth_feeHistory", [
+              "0x2",
+              "pending",
+              [10, 20],
+            ]);
+
+            const baseFees = feeHistory?.baseFeePerGas;
+            if (Array.isArray(baseFees) && baseFees.length) {
+              const rawBase = baseFees[baseFees.length - 1];
+              const baseWei = BigInt(rawBase);
+              // Pad by 25% and round up to reduce the chance of underpricing
+              computedBaseFee = (baseWei * 125n + 99n) / 100n;
+
+              if (!maxPriorityWei) {
+                const rewards = Array.isArray(feeHistory?.reward)
+                  ? feeHistory.reward
+                  : [];
+                const lastRewardRow = rewards.length
+                  ? rewards[rewards.length - 1]
+                  : null;
+                if (Array.isArray(lastRewardRow) && lastRewardRow.length > 1) {
+                  const rewardHex = lastRewardRow[1];
+                  try {
+                    const rewardWei = BigInt(rewardHex);
+                    if (rewardWei > 0n) maxPriorityWei = rewardWei;
+                  } catch (_) {
+                    /* ignore parse issues */
+                  }
+                }
+              }
+
+              if (!maxPriorityWei || maxPriorityWei === 0n) {
+                maxPriorityWei = ethers.parseUnits("2", "gwei");
+              }
+
+              if (!maxFeeWei) {
+                const baseComponent = computedBaseFee ?? baseWei;
+                maxFeeWei = baseComponent + maxPriorityWei;
+              }
+
+              if (maxPriorityWei && maxFeeWei) useEip1559 = true;
+            }
+          } catch (err) {
+            console.warn("eth_feeHistory failed", err);
+          }
+        }
+
+        if (!maxPriorityWei || !maxFeeWei) {
+          const fee = await rpcProvider.getFeeData();
+          if (!maxPriorityWei && fee.maxPriorityFeePerGas)
+            maxPriorityWei = fee.maxPriorityFeePerGas;
+          if (!maxFeeWei && fee.maxFeePerGas) maxFeeWei = fee.maxFeePerGas;
+
+          if (maxPriorityWei && maxFeeWei) {
+            useEip1559 = true;
+          } else if (fee.gasPrice) {
+            base.gasPrice = toHex(fee.gasPrice);
+          }
+        }
+
+        if (useEip1559 && maxPriorityWei && maxFeeWei) {
           base.type = "0x2";
           base.maxPriorityFeePerGas = toHex(maxPriorityWei);
           base.maxFeePerGas = toHex(maxFeeWei);
-        } else if (fee.gasPrice) {
-          base.gasPrice = toHex(fee.gasPrice);
         }
 
         const net = await rpcProvider.getNetwork();
@@ -380,18 +442,19 @@
             // Fallback to signer.signTransaction if available
             if (signer && typeof signer.signTransaction === "function") {
               const populated = await signer.populateTransaction({
-                to: txParams.to,
+                ...(txParams.to && { to: txParams.to }),
                 data: txParams.data,
                 value: txParams.value,
-                nonce: parseInt(txParams.nonce, 16),
-                gasLimit: parseInt(txParams.gas, 16),
+                ...(txParams.nonce && { nonce: txParams.nonce }),
                 maxFeePerGas: txParams.maxFeePerGas,
                 maxPriorityFeePerGas: txParams.maxPriorityFeePerGas,
-                gasPrice: txParams.gasPrice,
+                //gasPrice: txParams.gasPrice,
                 type: txParams.type ? Number(txParams.type) : undefined,
-                chainId: parseInt(txParams.chainId, 16),
+                //chainId: txParams.chainId,
                 accessList: txParams.accessList,
               });
+              console.log(populated);
+              console.log(populated.gasLimit);
               rawResp = await signer.signTransaction(populated);
             } else {
               throw new Error(
