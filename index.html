@@ -74,7 +74,7 @@
 
     <label>
       To:
-      <input type="text" id="toInput" placeholder="0x..." />
+      <input type="text" id="toInput" placeholder="0x" />
     </label>
     <label>
       Value (ETH):
@@ -175,8 +175,43 @@
       const copySigned = document.getElementById("copySigned");
       const signedHash = document.getElementById("signedHash");
 
+      const toInputEl = document.getElementById("toInput");
+      const valueInputEl = document.getElementById("valueInput");
+      const dataInputEl = document.getElementById("dataInput");
+      const nonceInputEl = document.getElementById("nonceInput");
+
       const mpgInput = document.getElementById("mpgInput");
       const mfgInput = document.getElementById("mfgInput");
+
+      // Apply URL parameter presets (e.g. ?to=0x...)
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const setFromParam = (key, apply) => {
+          const val = params.get(key);
+          if (val !== null && val !== "") apply(val);
+        };
+
+        setFromParam("to", (val) => {
+          toInputEl.value = val;
+        });
+        setFromParam("value", (val) => {
+          valueInputEl.value = val;
+        });
+        setFromParam("data", (val) => {
+          dataInputEl.value = val;
+        });
+        setFromParam("nonce", (val) => {
+          nonceInputEl.value = val;
+        });
+        setFromParam("mpg", (val) => {
+          mpgInput.value = val;
+        });
+        setFromParam("mfg", (val) => {
+          mfgInput.value = val;
+        });
+      } catch (err) {
+        console.warn("URL param parsing failed", err);
+      }
 
       let ethProvider = null;
       let rpcProvider = null; // ethers.BrowserProvider
@@ -291,6 +326,11 @@
         }
 
         if (!maxPriorityWei || !maxFeeWei) {
+          if (!maxPriorityWei || !maxFeeWei)
+            console.log("Fee selection: attempting eth_feeHistory", {
+              hasPriority: Boolean(maxPriorityWei),
+              hasMaxFee: Boolean(maxFeeWei),
+            });
           try {
             const feeHistory = await rpcProvider.send("eth_feeHistory", [
               "0x2",
@@ -304,6 +344,10 @@
               const baseWei = BigInt(rawBase);
               // Pad by 25% and round up to reduce the chance of underpricing
               computedBaseFee = (baseWei * 125n + 99n) / 100n;
+              console.log("Fee history base fee", {
+                rawBase,
+                paddedBase: computedBaseFee.toString(),
+              });
 
               if (!maxPriorityWei) {
                 const rewards = Array.isArray(feeHistory?.reward)
@@ -331,6 +375,10 @@
                 const baseComponent = computedBaseFee ?? baseWei;
                 maxFeeWei = baseComponent + maxPriorityWei;
               }
+              console.log("Fee history result", {
+                maxPriorityWei: maxPriorityWei?.toString(),
+                maxFeeWei: maxFeeWei?.toString(),
+              });
 
               if (maxPriorityWei && maxFeeWei) useEip1559 = true;
             }
@@ -340,6 +388,10 @@
         }
 
         if (!maxPriorityWei || !maxFeeWei) {
+          console.log("Fee selection: falling back to getFeeData", {
+            hasPriority: Boolean(maxPriorityWei),
+            hasMaxFee: Boolean(maxFeeWei),
+          });
           const fee = await rpcProvider.getFeeData();
           if (!maxPriorityWei && fee.maxPriorityFeePerGas)
             maxPriorityWei = fee.maxPriorityFeePerGas;
@@ -347,8 +399,15 @@
 
           if (maxPriorityWei && maxFeeWei) {
             useEip1559 = true;
+            console.log("Fee selection: using getFeeData EIP-1559", {
+              maxPriorityWei: maxPriorityWei?.toString(),
+              maxFeeWei: maxFeeWei?.toString(),
+            });
           } else if (fee.gasPrice) {
             base.gasPrice = toHex(fee.gasPrice);
+            console.log("Fee selection: using legacy gasPrice", {
+              gasPrice: fee.gasPrice.toString(),
+            });
           }
         }
 
@@ -356,6 +415,15 @@
           base.type = "0x2";
           base.maxPriorityFeePerGas = toHex(maxPriorityWei);
           base.maxFeePerGas = toHex(maxFeeWei);
+          console.log("Fee selection: final EIP-1559 params", {
+            maxPriorityFeePerGas: base.maxPriorityFeePerGas,
+            maxFeePerGas: base.maxFeePerGas,
+          });
+        } else {
+          console.log("Fee selection: final type not EIP-1559", {
+            type: base.type,
+            hasGasPrice: Boolean(base.gasPrice),
+          });
         }
 
         const net = await rpcProvider.getNetwork();
@@ -363,6 +431,11 @@
 
         // Optional: access list (best-effort)
         try {
+          console.log("AccessList: request start", {
+            type: base.type,
+            to: base.to,
+            hasData: Boolean(base.data),
+          });
           const { accessList } = await ethProvider.request({
             method: "eth_createAccessList",
             params: [
@@ -382,10 +455,22 @@
             );
             if (idx !== -1 && accessList[idx].storageKeys.length <= 24)
               accessList.splice(idx, 1);
-            if (base.type === "0x2") base.accessList = accessList;
+            if (base.type === "0x2") {
+              base.accessList = accessList;
+              console.log("AccessList: assigned", {
+                length: accessList.length,
+              });
+            } else {
+              console.log("AccessList: skipped assignment, non EIP-1559", {
+                type: base.type,
+                length: accessList.length,
+              });
+            }
+          } else {
+            console.log("AccessList: response not array", { accessList });
           }
-        } catch (_) {
-          /* ignore */
+        } catch (err) {
+          console.warn("AccessList: eth_createAccessList failed", err);
         }
 
         return base;
