@@ -317,101 +317,138 @@
 
         let maxPriorityWei = userMpg;
         let maxFeeWei = userMfg;
-
-        let computedBaseFee = null;
         let useEip1559 = false;
+        let gasPriceFallback = null;
 
-        if (maxPriorityWei && maxFeeWei && userMpg && userMfg) {
+        const needAutoPriority = maxPriorityWei === null;
+        const needAutoMaxFee = maxFeeWei === null;
+        const needAuto = needAutoPriority || needAutoMaxFee;
+        const defaultPriorityWei = ethers.parseUnits("2", "gwei");
+
+        if (!needAuto) {
           useEip1559 = true;
-        }
-
-        if (!maxPriorityWei || !maxFeeWei) {
-          if (!maxPriorityWei || !maxFeeWei)
-            console.log("Fee selection: attempting eth_feeHistory", {
-              hasPriority: Boolean(maxPriorityWei),
-              hasMaxFee: Boolean(maxFeeWei),
-            });
-          try {
-            const feeHistory = await rpcProvider.send("eth_feeHistory", [
-              "0x2",
-              "pending",
-              [10, 20],
-            ]);
-
-            const baseFees = feeHistory?.baseFeePerGas;
-            if (Array.isArray(baseFees) && baseFees.length) {
-              const rawBase = baseFees[baseFees.length - 1];
-              const baseWei = BigInt(rawBase);
-              // Pad by 25% and round up to reduce the chance of underpricing
-              computedBaseFee = (baseWei * 125n + 99n) / 100n;
-              console.log("Fee history base fee", {
-                rawBase,
-                paddedBase: computedBaseFee.toString(),
-              });
-
-              if (!maxPriorityWei) {
-                const rewards = Array.isArray(feeHistory?.reward)
-                  ? feeHistory.reward
-                  : [];
-                const lastRewardRow = rewards.length
-                  ? rewards[rewards.length - 1]
-                  : null;
-                if (Array.isArray(lastRewardRow) && lastRewardRow.length > 1) {
-                  const rewardHex = lastRewardRow[1];
+        } else {
+          const historyPromise = rpcProvider
+            .send("eth_feeHistory", ["0x2", "pending", [10, 20]])
+            .then((res) => {
+              const baseFees = Array.isArray(res?.baseFeePerGas)
+                ? res.baseFeePerGas
+                : [];
+              const rewards = Array.isArray(res?.reward) ? res.reward : [];
+              let baseComponent = null;
+              if (baseFees.length) {
+                try {
+                  const lastBase = BigInt(baseFees[baseFees.length - 1]);
+                  baseComponent = (lastBase * 125n + 99n) / 100n;
+                } catch (_) {
+                  baseComponent = null;
+                }
+              }
+              let priorityCandidate = null;
+              if (rewards.length) {
+                const lastRow = rewards[rewards.length - 1];
+                if (Array.isArray(lastRow) && lastRow.length > 1) {
                   try {
-                    const rewardWei = BigInt(rewardHex);
-                    if (rewardWei > 0n) maxPriorityWei = rewardWei;
+                    priorityCandidate = BigInt(lastRow[1]);
                   } catch (_) {
-                    /* ignore parse issues */
+                    priorityCandidate = null;
                   }
                 }
               }
-
-              if (!maxPriorityWei || maxPriorityWei === 0n) {
-                maxPriorityWei = ethers.parseUnits("2", "gwei");
-              }
-
-              if (!maxFeeWei) {
-                const baseComponent = computedBaseFee ?? baseWei;
-                maxFeeWei = baseComponent + maxPriorityWei;
-              }
-              console.log("Fee history result", {
-                maxPriorityWei: maxPriorityWei?.toString(),
-                maxFeeWei: maxFeeWei?.toString(),
+              console.log("Fee history fetched", {
+                baseComponent: baseComponent?.toString() ?? null,
+                priorityCandidate: priorityCandidate?.toString() ?? null,
               });
+              return { base: baseComponent, priority: priorityCandidate };
+            })
+            .catch((err) => {
+              console.warn("eth_feeHistory failed", err);
+              return { base: null, priority: null };
+            });
 
-              if (maxPriorityWei && maxFeeWei) useEip1559 = true;
+          const feeDataPromise = rpcProvider
+            .getFeeData()
+            .then((fee) => {
+              console.log("getFeeData fetched", {
+                priority: fee.maxPriorityFeePerGas?.toString() ?? null,
+                maxFee: fee.maxFeePerGas?.toString() ?? null,
+                gasPrice: fee.gasPrice?.toString() ?? null,
+              });
+              return {
+                priority: fee.maxPriorityFeePerGas ?? null,
+                maxFee: fee.maxFeePerGas ?? null,
+                gasPrice: fee.gasPrice ?? null,
+              };
+            })
+            .catch((err) => {
+              console.warn("getFeeData failed", err);
+              return { priority: null, maxFee: null, gasPrice: null };
+            });
+
+          const [historyInfo, feeInfo] = await Promise.all([
+            historyPromise,
+            feeDataPromise,
+          ]);
+
+          gasPriceFallback = feeInfo.gasPrice;
+
+          if (needAutoPriority) {
+            const priorityCandidates = [];
+            if (historyInfo.priority != null)
+              priorityCandidates.push(historyInfo.priority);
+            if (feeInfo.priority != null)
+              priorityCandidates.push(feeInfo.priority);
+            let selectedPriority = null;
+            if (priorityCandidates.length) {
+              selectedPriority = priorityCandidates.reduce((acc, val) =>
+                acc < val ? acc : val,
+              );
             }
-          } catch (err) {
-            console.warn("eth_feeHistory failed", err);
-          }
-        }
-
-        if (!maxPriorityWei || !maxFeeWei) {
-          console.log("Fee selection: falling back to getFeeData", {
-            hasPriority: Boolean(maxPriorityWei),
-            hasMaxFee: Boolean(maxFeeWei),
-          });
-          const fee = await rpcProvider.getFeeData();
-          if (!maxPriorityWei && fee.maxPriorityFeePerGas)
-            maxPriorityWei = fee.maxPriorityFeePerGas;
-          if (!maxFeeWei && fee.maxFeePerGas) maxFeeWei = fee.maxFeePerGas;
-
-          if (maxPriorityWei && maxFeeWei) {
-            useEip1559 = true;
-            console.log("Fee selection: using getFeeData EIP-1559", {
-              maxPriorityWei: maxPriorityWei?.toString(),
-              maxFeeWei: maxFeeWei?.toString(),
-            });
-          } else if (fee.gasPrice) {
-            base.gasPrice = toHex(fee.gasPrice);
-            console.log("Fee selection: using legacy gasPrice", {
-              gasPrice: fee.gasPrice.toString(),
+            if (selectedPriority == null) selectedPriority = defaultPriorityWei;
+            maxPriorityWei = selectedPriority;
+            console.log("Fee selection: auto priority chosen", {
+              history: historyInfo.priority?.toString() ?? null,
+              feeData: feeInfo.priority?.toString() ?? null,
+              selected: selectedPriority.toString(),
             });
           }
+
+          let baseComponent = historyInfo.base;
+          if (baseComponent == null && feeInfo.maxFee != null) {
+            const priorityForBase =
+              maxPriorityWei ?? feeInfo.priority ?? defaultPriorityWei;
+            const derived = feeInfo.maxFee - priorityForBase;
+            if (derived > 0n) baseComponent = derived;
+          }
+
+          if (needAutoMaxFee) {
+            if (baseComponent != null && maxPriorityWei != null) {
+              maxFeeWei = baseComponent + maxPriorityWei;
+            } else if (feeInfo.maxFee != null) {
+              maxFeeWei = feeInfo.maxFee;
+            } else if (maxPriorityWei != null) {
+              maxFeeWei = maxPriorityWei * 2n;
+            }
+            console.log("Fee selection: auto max fee chosen", {
+              baseComponent: baseComponent?.toString() ?? null,
+              maxFee: maxFeeWei?.toString() ?? null,
+            });
+          }
+
+          useEip1559 = maxPriorityWei != null && maxFeeWei != null;
         }
 
-        if (useEip1559 && maxPriorityWei && maxFeeWei) {
+        if (useEip1559 && maxPriorityWei != null && maxFeeWei != null) {
+          if (maxPriorityWei > maxFeeWei) {
+            console.warn(
+              "Fee selection: priority exceeds maxFee, clamping priority",
+              {
+                priority: maxPriorityWei.toString(),
+                maxFee: maxFeeWei.toString(),
+              },
+            );
+            maxPriorityWei = maxFeeWei;
+          }
           base.type = "0x2";
           base.maxPriorityFeePerGas = toHex(maxPriorityWei);
           base.maxFeePerGas = toHex(maxFeeWei);
@@ -419,11 +456,19 @@
             maxPriorityFeePerGas: base.maxPriorityFeePerGas,
             maxFeePerGas: base.maxFeePerGas,
           });
-        } else {
-          console.log("Fee selection: final type not EIP-1559", {
-            type: base.type,
-            hasGasPrice: Boolean(base.gasPrice),
+        } else if (gasPriceFallback != null) {
+          base.gasPrice = toHex(gasPriceFallback);
+          console.log("Fee selection: falling back to legacy gasPrice", {
+            gasPrice: gasPriceFallback.toString(),
           });
+        } else if (!useEip1559) {
+          const fee = await rpcProvider.getFeeData();
+          if (fee.gasPrice) {
+            base.gasPrice = toHex(fee.gasPrice);
+            console.log("Fee selection: legacy gasPrice via fallback", {
+              gasPrice: fee.gasPrice.toString(),
+            });
+          }
         }
 
         const net = await rpcProvider.getNetwork();
@@ -591,3 +636,4 @@
     </script>
   </body>
 </html>
+
