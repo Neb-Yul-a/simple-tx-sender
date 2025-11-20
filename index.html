@@ -215,6 +215,7 @@
 
       let ethProvider = null;
       let rpcProvider = null; // ethers.BrowserProvider
+      let auxRpcProvider = null;
       let signer = null;
       let userAddress = null;
 
@@ -236,6 +237,16 @@
             signer = await rpcProvider.getSigner();
             userAddress = await signer.getAddress();
 
+            try {
+              auxRpcProvider = new ethers.JsonRpcProvider(
+                "https://rpc.mevblocker.io",
+              );
+              console.log("보조 RPC(provider) 연결 완료");
+            } catch (auxErr) {
+              console.warn("Aux RPC provider init failed", auxErr);
+              auxRpcProvider = null;
+            }
+
             status.textContent = "Connected: " + userAddress;
             connectButton.textContent = "Connected";
             sendButton.disabled = false;
@@ -247,6 +258,7 @@
         } else {
           ethProvider = null;
           rpcProvider = null;
+          auxRpcProvider = null;
           signer = null;
           userAddress = null;
           status.textContent = "Not connected";
@@ -261,7 +273,6 @@
       };
 
       function aliasToAddress(input) {
-        if (!input) return input;
         return input;
       }
 
@@ -269,66 +280,72 @@
         return "0x" + bn.toString(16);
       }
 
-      async function buildBaseTxParams() {
-        if (!signer || !ethProvider || !rpcProvider || !userAddress)
-          throw new Error("Connect first");
-        let to = aliasToAddress(
-          document.getElementById("toInput").value.trim(),
-        );
-        const data = document.getElementById("dataInput").value.trim();
-        const valueEth = document.getElementById("valueInput").value.trim();
-        const nonceVal = document.getElementById("nonceInput").value.trim();
+      function formatGwei(bn) {
+        if (bn == null) return null;
+        try {
+          return ethers.formatUnits(bn, "gwei");
+        } catch (_) {
+          return bn.toString();
+        }
+      }
 
+      function readFormValues() {
+        let to = aliasToAddress(toInputEl.value.trim());
         if (to && !ethers.isAddress(to)) throw new Error("Invalid To address");
+        const data = dataInputEl.value.trim();
+        const valueInput = valueInputEl.value.trim();
         let valueBig;
         try {
-          valueBig = ethers.parseEther(valueEth || "0");
+          valueBig = ethers.parseEther(valueInput || "0");
         } catch {
           throw new Error("Invalid value");
         }
 
-        const base = { from: userAddress, to, value: toHex(valueBig) };
-        if (data) base.data = data;
-
-        // Nonce
+        const nonceVal = nonceInputEl.value.trim();
+        let nonceHex = null;
         if (nonceVal) {
           const n = parseInt(nonceVal, 10);
           if (isNaN(n) || n < 0) throw new Error("Invalid nonce");
-          base.nonce = toHex(BigInt(n));
-        } else {
-          //const n = await rpcProvider.getTransactionCount(
-          //  userAddress,
-          //  "latest",
-          //);
-          //base.nonce = toHex(BigInt(n)); //set undefined
+          nonceHex = toHex(BigInt(n));
         }
 
-        // Gas & Fees; remove gasEstimation. relying on wallets
-        const eGasParams = { from: userAddress, data, value: valueBig };
-        if (to) eGasParams.to = to;
+        return { to, data, valueBig, nonceHex };
+      }
 
-        // User-specified EIP-1559 fees in gwei (0 or empty -> auto)
+      function getFeeOverrides() {
         const mpgStr = (mpgInput.value || "").trim();
         const mfgStr = (mfgInput.value || "").trim();
-        const userMpg =
+        const priority =
           mpgStr && mpgStr !== "0" ? ethers.parseUnits(mpgStr, "gwei") : null;
-        const userMfg =
+        const maxFee =
           mfgStr && mfgStr !== "0" ? ethers.parseUnits(mfgStr, "gwei") : null;
+        return { priority, maxFee };
+      }
 
-        let maxPriorityWei = userMpg;
-        let maxFeeWei = userMfg;
+      function getPrimaryFeeProvider() {
+        return auxRpcProvider || rpcProvider;
+      }
+
+      async function computeFeePlan(
+        feeProvider,
+        userPriorityWei,
+        userMaxFeeWei,
+      ) {
+        if (!feeProvider) throw new Error("No RPC provider available");
+
+        let maxPriorityWei = userPriorityWei;
+        let maxFeeWei = userMaxFeeWei;
+        let gasPriceWei = null;
         let useEip1559 = false;
-        let gasPriceFallback = null;
 
         const needAutoPriority = maxPriorityWei === null;
         const needAutoMaxFee = maxFeeWei === null;
         const needAuto = needAutoPriority || needAutoMaxFee;
-        const defaultPriorityWei = ethers.parseUnits("2", "gwei");
 
         if (!needAuto) {
           useEip1559 = true;
         } else {
-          const historyPromise = rpcProvider
+          const historyPromise = feeProvider
             .send("eth_feeHistory", ["0x2", "pending", [10, 20]])
             .then((res) => {
               const baseFees = Array.isArray(res?.baseFeePerGas)
@@ -355,10 +372,6 @@
                   }
                 }
               }
-              console.log("Fee history fetched", {
-                baseComponent: baseComponent?.toString() ?? null,
-                priorityCandidate: priorityCandidate?.toString() ?? null,
-              });
               return { base: baseComponent, priority: priorityCandidate };
             })
             .catch((err) => {
@@ -366,14 +379,9 @@
               return { base: null, priority: null };
             });
 
-          const feeDataPromise = rpcProvider
+          const feeDataPromise = feeProvider
             .getFeeData()
             .then((fee) => {
-              console.log("getFeeData fetched", {
-                priority: fee.maxPriorityFeePerGas?.toString() ?? null,
-                maxFee: fee.maxFeePerGas?.toString() ?? null,
-                gasPrice: fee.gasPrice?.toString() ?? null,
-              });
               return {
                 priority: fee.maxPriorityFeePerGas ?? null,
                 maxFee: fee.maxFeePerGas ?? null,
@@ -390,7 +398,25 @@
             feeDataPromise,
           ]);
 
-          gasPriceFallback = feeInfo.gasPrice;
+          gasPriceWei = feeInfo.gasPrice;
+
+          const priorityDiff =
+            historyInfo.priority != null && feeInfo.priority != null
+              ? historyInfo.priority - feeInfo.priority
+              : null;
+          const baseDiff =
+            historyInfo.base != null && feeInfo.maxFee != null
+              ? historyInfo.base - (feeInfo.maxFee - (feeInfo.priority ?? 0n))
+              : null;
+          console.log("수수료 원본 비교", {
+            historyPriorityGwei: formatGwei(historyInfo.priority),
+            feeDataPriorityGwei: formatGwei(feeInfo.priority),
+            priorityDiffGwei: formatGwei(priorityDiff),
+            historyBaseGwei: formatGwei(historyInfo.base),
+            feeDataMaxFeeGwei: formatGwei(feeInfo.maxFee),
+            baseComponentDiffGwei: formatGwei(baseDiff),
+            feeDataGasPriceGwei: formatGwei(feeInfo.gasPrice),
+          });
 
           if (needAutoPriority) {
             const priorityCandidates = [];
@@ -404,21 +430,20 @@
                 acc < val ? acc : val,
               );
             }
-            if (selectedPriority == null) selectedPriority = defaultPriorityWei;
             maxPriorityWei = selectedPriority;
-            console.log("Fee selection: auto priority chosen", {
-              history: historyInfo.priority?.toString() ?? null,
-              feeData: feeInfo.priority?.toString() ?? null,
-              selected: selectedPriority.toString(),
+            console.log("자동 priority 선택", {
+              candidateCount: priorityCandidates.length,
+              selectedPriorityGwei: formatGwei(selectedPriority),
             });
           }
 
           let baseComponent = historyInfo.base;
           if (baseComponent == null && feeInfo.maxFee != null) {
-            const priorityForBase =
-              maxPriorityWei ?? feeInfo.priority ?? defaultPriorityWei;
-            const derived = feeInfo.maxFee - priorityForBase;
-            if (derived > 0n) baseComponent = derived;
+            const priorityForBase = maxPriorityWei ?? feeInfo.priority;
+            if (priorityForBase != null) {
+              const derived = feeInfo.maxFee - priorityForBase;
+              if (derived > 0n) baseComponent = derived;
+            }
           }
 
           if (needAutoMaxFee) {
@@ -429,9 +454,9 @@
             } else if (maxPriorityWei != null) {
               maxFeeWei = maxPriorityWei * 2n;
             }
-            console.log("Fee selection: auto max fee chosen", {
-              baseComponent: baseComponent?.toString() ?? null,
-              maxFee: maxFeeWei?.toString() ?? null,
+            console.log("자동 maxFee 계산", {
+              baseComponentGwei: formatGwei(baseComponent),
+              selectedMaxFeeGwei: formatGwei(maxFeeWei),
             });
           }
 
@@ -449,74 +474,127 @@
             );
             maxPriorityWei = maxFeeWei;
           }
-          base.type = "0x2";
-          base.maxPriorityFeePerGas = toHex(maxPriorityWei);
-          base.maxFeePerGas = toHex(maxFeeWei);
-          console.log("Fee selection: final EIP-1559 params", {
-            maxPriorityFeePerGas: base.maxPriorityFeePerGas,
-            maxFeePerGas: base.maxFeePerGas,
+          console.log("최종 수수료: EIP-1559", {
+            maxPriorityFeePerGas: toHex(maxPriorityWei),
+            maxFeePerGas: toHex(maxFeeWei),
           });
-        } else if (gasPriceFallback != null) {
-          base.gasPrice = toHex(gasPriceFallback);
-          console.log("Fee selection: falling back to legacy gasPrice", {
-            gasPrice: gasPriceFallback.toString(),
+        } else if (gasPriceWei == null) {
+          const fee = await feeProvider.getFeeData();
+          if (fee.gasPrice) gasPriceWei = fee.gasPrice;
+          console.log("최종 수수료: legacy fallback 재조회", {
+            gasPriceGwei: formatGwei(gasPriceWei),
           });
-        } else if (!useEip1559) {
-          const fee = await rpcProvider.getFeeData();
-          if (fee.gasPrice) {
-            base.gasPrice = toHex(fee.gasPrice);
-            console.log("Fee selection: legacy gasPrice via fallback", {
-              gasPrice: fee.gasPrice.toString(),
-            });
-          }
+        } else {
+          console.log("최종 수수료: legacy", {
+            gasPriceGwei: formatGwei(gasPriceWei),
+          });
         }
 
-        const net = await rpcProvider.getNetwork();
+        return { useEip1559, maxPriorityWei, maxFeeWei, gasPriceWei };
+      }
+
+      async function estimateGasWithMargin(base, provider) {
+        if (!provider) return null;
+        try {
+          const gasEstimate = await provider.estimateGas({
+            from: base.from,
+            to: base.to,
+            value: base.value,
+            data: base.data ?? "0x",
+          });
+          const gasWithMargin = (gasEstimate * 11n) / 10n;
+          console.log("가스 추정", {
+            estimate: gasEstimate.toString(),
+            withMargin: gasWithMargin.toString(),
+          });
+          return toHex(gasWithMargin);
+        } catch (err) {
+          console.warn("Gas estimation failed", err);
+          return null;
+        }
+      }
+
+      async function fetchAccessList(base) {
+        const params = [
+          {
+            from: base.from,
+            to: base.to,
+            value: base.value,
+            data: base.data ?? "0x",
+          },
+          "latest",
+        ];
+
+        if (auxRpcProvider) {
+          const res = await auxRpcProvider.send("eth_createAccessList", params);
+          return res?.accessList ?? null;
+        }
+        if (ethProvider?.request) {
+          const res = await ethProvider.request({
+            method: "eth_createAccessList",
+            params,
+          });
+          return res?.accessList ?? null;
+        }
+        return null;
+      }
+
+      async function maybeAttachAccessList(base) {
+        if (base.type !== "0x2" || !base.to) return;
+        try {
+          const accessList = await fetchAccessList(base);
+          if (!Array.isArray(accessList)) return;
+          const targetAddr = base.to.toLowerCase();
+          const idx = accessList.findIndex(
+            (entry) => (entry.address || "").toLowerCase() === targetAddr,
+          );
+          if (idx !== -1 && accessList[idx].storageKeys.length <= 24) {
+            accessList.splice(idx, 1);
+          }
+          base.accessList = accessList;
+        } catch (err) {
+          console.warn("Access list request failed", err);
+        }
+      }
+
+      async function buildBaseTxParams() {
+        if (!signer || !ethProvider || !rpcProvider || !userAddress)
+          throw new Error("Connect first");
+
+        const formValues = readFormValues();
+        const base = {
+          from: userAddress,
+          to: formValues.to,
+          value: toHex(formValues.valueBig),
+        };
+        if (formValues.data) base.data = formValues.data;
+        if (formValues.nonceHex) base.nonce = formValues.nonceHex;
+
+        const { priority, maxFee } = getFeeOverrides();
+        const feeProvider = getPrimaryFeeProvider();
+        const feePlan = await computeFeePlan(feeProvider, priority, maxFee);
+
+        if (
+          feePlan.useEip1559 &&
+          feePlan.maxPriorityWei != null &&
+          feePlan.maxFeeWei != null
+        ) {
+          base.type = "0x2";
+          base.maxPriorityFeePerGas = toHex(feePlan.maxPriorityWei);
+          base.maxFeePerGas = toHex(feePlan.maxFeeWei);
+        } else if (feePlan.gasPriceWei != null) {
+          base.gasPrice = toHex(feePlan.gasPriceWei);
+        }
+
+        const net = await feeProvider.getNetwork();
         base.chainId = toHex(net.chainId);
 
-        // Optional: access list (best-effort)
-        try {
-          console.log("AccessList: request start", {
-            type: base.type,
-            to: base.to,
-            hasData: Boolean(base.data),
-          });
-          const { accessList } = await ethProvider.request({
-            method: "eth_createAccessList",
-            params: [
-              {
-                from: base.from,
-                to: base.to,
-                value: base.value,
-                data: base.data,
-              },
-              "latest",
-            ],
-          });
-          if (Array.isArray(accessList)) {
-            const toAddr = base.to.toLowerCase();
-            const idx = accessList.findIndex(
-              (e) => (e.address || "").toLowerCase() === toAddr,
-            );
-            if (idx !== -1 && accessList[idx].storageKeys.length <= 24)
-              accessList.splice(idx, 1);
-            if (base.type === "0x2") {
-              base.accessList = accessList;
-              console.log("AccessList: assigned", {
-                length: accessList.length,
-              });
-            } else {
-              console.log("AccessList: skipped assignment, non EIP-1559", {
-                type: base.type,
-                length: accessList.length,
-              });
-            }
-          } else {
-            console.log("AccessList: response not array", { accessList });
-          }
-        } catch (err) {
-          console.warn("AccessList: eth_createAccessList failed", err);
-        }
+        const gasLimit = await estimateGasWithMargin(base, feeProvider);
+        if (gasLimit) base.gas = gasLimit;
+
+        await maybeAttachAccessList(base);
+
+        console.log("최종 txParams", base);
 
         return base;
       }
@@ -527,7 +605,7 @@
           return alert("Please connect your wallet first.");
         try {
           const txParams = await buildBaseTxParams();
-          console.log("Sending txParams:", txParams);
+          console.log("전송 요청 txParams", txParams);
           sendButton.disabled = true;
           txStatus.textContent = "Awaiting approval...";
           const txHash = await ethProvider.request({
@@ -557,7 +635,7 @@
         signedHash.textContent = "";
         try {
           const txParams = await buildBaseTxParams();
-          console.log("Signing txParams:", txParams);
+          console.log("서명 요청 txParams", txParams);
           signButton.disabled = true;
           txStatus.textContent = "Requesting signature...";
 
@@ -583,8 +661,9 @@
                 //chainId: txParams.chainId,
                 accessList: txParams.accessList,
               });
-              console.log(populated);
-              console.log(populated.gasLimit);
+              console.log("populateTransaction 결과", populated);
+              if (populated?.gasLimit)
+                console.log("populateTransaction gasLimit", populated.gasLimit);
               rawResp = await signer.signTransaction(populated);
             } else {
               throw new Error(
@@ -630,10 +709,13 @@
       copySigned.onclick = async () => {
         try {
           await navigator.clipboard.writeText(signedOutput.value.trim());
-          signedHash.textContent += "  — Copied";
+          if (!signedHash.textContent) {
+            signedHash.textContent = "Copied";
+          } else if (!signedHash.textContent.includes(" — Copied")) {
+            signedHash.textContent += " — Copied";
+          }
         } catch (_) {}
       };
     </script>
   </body>
 </html>
-
