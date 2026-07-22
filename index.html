@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Simple Ethereum Tx Sender</title>
+    <title>Simple EVM Tx Sender</title>
     <!-- Ethers.js v6 UMD CDN -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.15.0/ethers.umd.min.js"></script>
     <style>
@@ -11,10 +11,12 @@
         font-family: Arial, sans-serif;
         margin: 2rem;
       }
+
       label {
         display: block;
         margin: 0.5rem 0;
       }
+
       input,
       textarea,
       select {
@@ -22,47 +24,57 @@
         padding: 0.5rem;
         margin-top: 0.2rem;
         font-family: monospace;
+        box-sizing: border-box;
       }
+
       textarea {
         resize: vertical;
       }
+
       button {
         padding: 0.6rem 1.2rem;
         margin-top: 1rem;
         cursor: pointer;
       }
+
       button:disabled {
         opacity: 0.6;
         cursor: not-allowed;
       }
+
       #status,
       #txStatus {
         margin-top: 1rem;
         white-space: pre-wrap;
       }
+
       .row {
         display: flex;
         gap: 1rem;
         align-items: center;
         flex-wrap: wrap;
       }
+
       .row > * {
         flex: 1 1 auto;
       }
+
       .muted {
         color: #666;
         font-size: 0.9em;
       }
+
       #signedBox {
         margin-top: 1rem;
       }
     </style>
   </head>
+
   <body>
-    <!-- Wallet selection if multiple providers detected -->
+    <!-- Wallet selection if multiple injected providers are detected -->
     <div id="providerSelectContainer" style="display: none">
-      <label for="providerSelect"
-        >Select Wallet:
+      <label for="providerSelect">
+        Select Wallet:
         <select id="providerSelect"></select>
       </label>
     </div>
@@ -76,18 +88,21 @@
       To:
       <input type="text" id="toInput" placeholder="0x" />
     </label>
+
     <label>
-      Value (ETH):
+      Value (native token):
       <input type="text" id="valueInput" placeholder="0.0" />
     </label>
+
     <label>
       Calldata (hex):
       <textarea
         id="dataInput"
         rows="10"
-        placeholder="자동 설정 (빈칸 = ETH transfer)"
+        placeholder="자동 설정 (빈칸 = native token transfer)"
       ></textarea>
     </label>
+
     <label>
       Nonce (optional):
       <input type="text" id="nonceInput" placeholder="자동 설정" />
@@ -99,12 +114,13 @@
     </div>
 
     <div class="row">
-      <label style="flex: 1"
-        >Max Priority Fee (gwei, optional)
+      <label style="flex: 1">
+        Max Priority Fee (gwei, optional)
         <input type="text" id="mpgInput" placeholder="0 = auto" />
       </label>
-      <label style="flex: 1"
-        >Max Fee (gwei, optional)
+
+      <label style="flex: 1">
+        Max Fee (gwei, optional)
         <input type="text" id="mfgInput" placeholder="0 = auto" />
       </label>
     </div>
@@ -116,10 +132,12 @@
         Signed Raw Tx (hex):
         <textarea id="signedOutput" rows="4" readonly></textarea>
       </label>
+
       <div class="row">
         <button id="copySigned" style="flex: 0 0 auto">Copy</button>
         <div id="signedHash" class="muted"></div>
       </div>
+
       <div class="muted">
         Note: Some wallets (e.g. MetaMask extension) do not support
         <code>eth_signTransaction</code>. In that case, try Frame/OKX/Rabby or a
@@ -128,43 +146,13 @@
     </div>
 
     <script>
-      // Populate wallet providers if multiple
+      const MAINNET_CHAIN_ID = 1n;
+      const MAINNET_AUX_RPC_URL = "https://eth.blockrazor.xyz";
+
       const providerSelectContainer = document.getElementById(
         "providerSelectContainer",
       );
       const providerSelect = document.getElementById("providerSelect");
-      if (
-        window.ethereum &&
-        Array.isArray(window.ethereum.providers) &&
-        window.ethereum.providers.length > 1
-      ) {
-        const list = window.ethereum.providers;
-        list.forEach((p, idx) => {
-          let name = "Provider " + idx;
-          if (p.isMetaMask) name = "MetaMask";
-          else if (p.isFrame) name = "Frame";
-          else if (p.isOkxWallet || p.isOKXWallet) name = "OKX Wallet";
-          const opt = document.createElement("option");
-          opt.value = idx;
-          opt.textContent = name;
-          providerSelect.appendChild(opt);
-        });
-        providerSelectContainer.style.display = "block";
-      }
-
-      // Utility to get the selected provider
-      function getProvider() {
-        if (
-          window.ethereum &&
-          Array.isArray(window.ethereum.providers) &&
-          window.ethereum.providers.length > 1
-        ) {
-          const idx = parseInt(providerSelect.value || "0", 10);
-          return window.ethereum.providers[idx];
-        }
-        return window.ethereum || null;
-      }
-
       const connectButton = document.getElementById("connectButton");
       const sendButton = document.getElementById("sendButton");
       const signButton = document.getElementById("signButton");
@@ -179,151 +167,342 @@
       const valueInputEl = document.getElementById("valueInput");
       const dataInputEl = document.getElementById("dataInput");
       const nonceInputEl = document.getElementById("nonceInput");
-
       const mpgInput = document.getElementById("mpgInput");
       const mfgInput = document.getElementById("mfgInput");
 
-      // Apply URL parameter presets (e.g. ?to=0x...)
-      try {
-        const params = new URLSearchParams(window.location.search);
-        const setFromParam = (key, apply) => {
-          const val = params.get(key);
-          if (val !== null && val !== "") apply(val);
-        };
-
-        setFromParam("to", (val) => {
-          toInputEl.value = val;
-        });
-        setFromParam("value", (val) => {
-          valueInputEl.value = val;
-        });
-        setFromParam("data", (val) => {
-          dataInputEl.value = val;
-        });
-        setFromParam("nonce", (val) => {
-          nonceInputEl.value = val;
-        });
-        setFromParam("mpg", (val) => {
-          mpgInput.value = val;
-        });
-        setFromParam("mfg", (val) => {
-          mfgInput.value = val;
-        });
-      } catch (err) {
-        console.warn("URL param parsing failed", err);
-      }
-
       let ethProvider = null;
-      let rpcProvider = null; // ethers.BrowserProvider
+      let rpcProvider = null;
       let auxRpcProvider = null;
       let signer = null;
       let userAddress = null;
+      let subscribedProvider = null;
 
       if (typeof ethers === "undefined") {
         alert("Ethers.js failed to load.");
         console.error("Ethers.js undefined");
       }
 
-      // Connect / Disconnect
-      connectButton.onclick = async () => {
-        if (connectButton.textContent === "Connect Wallet") {
-          ethProvider = getProvider();
-          if (!ethProvider) return alert("No wallet found.");
-          try {
-            if (ethProvider.request)
-              await ethProvider.request({ method: "eth_requestAccounts" });
-            else if (ethProvider.enable) await ethProvider.enable();
-            rpcProvider = new ethers.BrowserProvider(ethProvider);
-            signer = await rpcProvider.getSigner();
-            userAddress = await signer.getAddress();
+      // Populate wallet providers if multiple injected providers are detected.
+      if (
+        window.ethereum &&
+        Array.isArray(window.ethereum.providers) &&
+        window.ethereum.providers.length > 1
+      ) {
+        window.ethereum.providers.forEach((provider, index) => {
+          let name = "Provider " + index;
 
-            try {
-              auxRpcProvider = new ethers.JsonRpcProvider(
-                "https://eth.blockrazor.xyz",
-              );
-              console.log("보조 RPC(provider) 연결 완료");
-            } catch (auxErr) {
-              console.warn("Aux RPC provider init failed", auxErr);
-              auxRpcProvider = null;
-            }
-
-            status.textContent = "Connected: " + userAddress;
-            connectButton.textContent = "Connected";
-            sendButton.disabled = false;
-            signButton.disabled = false;
-          } catch (err) {
-            console.error(err);
-            status.textContent = "Connection failed: " + (err.message || err);
+          if (provider.isMetaMask) name = "MetaMask";
+          else if (provider.isFrame) name = "Frame";
+          else if (provider.isOkxWallet || provider.isOKXWallet) {
+            name = "OKX Wallet";
+          } else if (provider.isRabby) {
+            name = "Rabby";
           }
-        } else {
-          ethProvider = null;
-          rpcProvider = null;
-          auxRpcProvider = null;
-          signer = null;
-          userAddress = null;
-          status.textContent = "Not connected";
-          connectButton.textContent = "Connect Wallet";
-          sendButton.disabled = true;
-          signButton.disabled = true;
-          txStatus.textContent = "";
-          signedBox.style.display = "none";
-          signedOutput.value = "";
-          signedHash.textContent = "";
+
+          const option = document.createElement("option");
+          option.value = index;
+          option.textContent = name;
+          providerSelect.appendChild(option);
+        });
+
+        providerSelectContainer.style.display = "block";
+      }
+
+      function getInjectedProvider() {
+        if (
+          window.ethereum &&
+          Array.isArray(window.ethereum.providers) &&
+          window.ethereum.providers.length > 1
+        ) {
+          const index = parseInt(providerSelect.value || "0", 10);
+          return window.ethereum.providers[index];
         }
-      };
+
+        return window.ethereum || null;
+      }
+
+      // Apply URL parameter presets, e.g. ?to=0x...&value=1&data=0x...
+      try {
+        const params = new URLSearchParams(window.location.search);
+
+        const setFromParam = (key, apply) => {
+          const value = params.get(key);
+          if (value !== null && value !== "") apply(value);
+        };
+
+        setFromParam("to", (value) => {
+          toInputEl.value = value;
+        });
+        setFromParam("value", (value) => {
+          valueInputEl.value = value;
+        });
+        setFromParam("data", (value) => {
+          dataInputEl.value = value;
+        });
+        setFromParam("nonce", (value) => {
+          nonceInputEl.value = value;
+        });
+        setFromParam("mpg", (value) => {
+          mpgInput.value = value;
+        });
+        setFromParam("mfg", (value) => {
+          mfgInput.value = value;
+        });
+      } catch (error) {
+        console.warn("URL param parsing failed", error);
+      }
+
+      function toHex(value) {
+        return "0x" + BigInt(value).toString(16);
+      }
+
+      function formatGwei(value) {
+        if (value == null) return null;
+
+        try {
+          return ethers.formatUnits(value, "gwei");
+        } catch (_) {
+          return value.toString();
+        }
+      }
 
       function aliasToAddress(input) {
         return input;
       }
 
-      function toHex(bn) {
-        return "0x" + bn.toString(16);
+      function resetSignedOutput() {
+        signedBox.style.display = "none";
+        signedOutput.value = "";
+        signedHash.textContent = "";
       }
 
-      function formatGwei(bn) {
-        if (bn == null) return null;
+      function setDisconnectedState() {
+        unsubscribeProviderEvents();
+
+        ethProvider = null;
+        rpcProvider = null;
+        signer = null;
+        userAddress = null;
+
+        status.textContent = "Not connected";
+        connectButton.textContent = "Connect Wallet";
+        sendButton.disabled = true;
+        signButton.disabled = true;
+        txStatus.textContent = "";
+        resetSignedOutput();
+      }
+
+      async function getWalletChainIdHex() {
+        if (!ethProvider) throw new Error("No wallet provider available");
+
+        if (typeof ethProvider.request === "function") {
+          return await ethProvider.request({ method: "eth_chainId" });
+        }
+
+        if (rpcProvider) {
+          return await rpcProvider.send("eth_chainId", []);
+        }
+
+        throw new Error("Unable to read wallet chainId");
+      }
+
+      async function syncConnectedWallet() {
+        if (!ethProvider) throw new Error("No wallet provider available");
+
+        // Recreate BrowserProvider and signer after chain/account changes.
+        rpcProvider = new ethers.BrowserProvider(ethProvider);
+        signer = await rpcProvider.getSigner();
+        userAddress = await signer.getAddress();
+
+        const chainIdHex = await getWalletChainIdHex();
+        const chainId = BigInt(chainIdHex);
+
+        status.textContent = `Connected: ${userAddress}\nChain ID: ${chainId}`;
+        connectButton.textContent = "Disconnect";
+        sendButton.disabled = false;
+        signButton.disabled = false;
+      }
+
+      async function handleChainChanged(chainIdHex) {
+        console.log("Wallet chain changed", {
+          chainIdHex,
+          chainId: BigInt(chainIdHex).toString(),
+        });
+
+        txStatus.textContent = "Wallet chain changed. Provider resynchronized.";
+        resetSignedOutput();
+
         try {
-          return ethers.formatUnits(bn, "gwei");
-        } catch (_) {
-          return bn.toString();
+          await syncConnectedWallet();
+        } catch (error) {
+          console.error("Failed to resync after chain change", error);
+          setDisconnectedState();
         }
       }
 
+      async function handleAccountsChanged(accounts) {
+        if (!Array.isArray(accounts) || accounts.length === 0) {
+          setDisconnectedState();
+          return;
+        }
+
+        txStatus.textContent = "Wallet account changed. Provider resynchronized.";
+        resetSignedOutput();
+
+        try {
+          await syncConnectedWallet();
+        } catch (error) {
+          console.error("Failed to resync after account change", error);
+          setDisconnectedState();
+        }
+      }
+
+      function subscribeProviderEvents(provider) {
+        unsubscribeProviderEvents();
+
+        if (!provider || typeof provider.on !== "function") return;
+
+        provider.on("chainChanged", handleChainChanged);
+        provider.on("accountsChanged", handleAccountsChanged);
+        subscribedProvider = provider;
+      }
+
+      function unsubscribeProviderEvents() {
+        if (!subscribedProvider) return;
+
+        if (typeof subscribedProvider.removeListener === "function") {
+          subscribedProvider.removeListener("chainChanged", handleChainChanged);
+          subscribedProvider.removeListener(
+            "accountsChanged",
+            handleAccountsChanged,
+          );
+        }
+
+        subscribedProvider = null;
+      }
+
+      function getAuxMainnetProvider() {
+        if (auxRpcProvider) return auxRpcProvider;
+
+        try {
+          auxRpcProvider = new ethers.JsonRpcProvider(MAINNET_AUX_RPC_URL);
+          console.log("Ethereum Mainnet auxiliary fee RPC initialized");
+          return auxRpcProvider;
+        } catch (error) {
+          console.warn("Auxiliary Mainnet RPC initialization failed", error);
+          auxRpcProvider = null;
+          return null;
+        }
+      }
+
+      async function selectFeeProvider(chainId) {
+        // The auxiliary RPC is Ethereum Mainnet-only and is used only for fee data.
+        if (chainId === MAINNET_CHAIN_ID) {
+          const auxiliaryProvider = getAuxMainnetProvider();
+
+          if (auxiliaryProvider) {
+            try {
+              const auxiliaryNetwork = await auxiliaryProvider.getNetwork();
+
+              if (auxiliaryNetwork.chainId === MAINNET_CHAIN_ID) {
+                console.log("Fee provider: Ethereum Mainnet auxiliary RPC");
+                return auxiliaryProvider;
+              }
+
+              console.warn("Auxiliary RPC returned an unexpected chain", {
+                expectedChainId: MAINNET_CHAIN_ID.toString(),
+                actualChainId: auxiliaryNetwork.chainId.toString(),
+              });
+            } catch (error) {
+              console.warn(
+                "Auxiliary fee RPC unavailable; using wallet RPC",
+                error,
+              );
+            }
+          }
+        }
+
+        console.log("Fee provider: connected wallet RPC", {
+          chainId: chainId.toString(),
+        });
+        return rpcProvider;
+      }
+
+      connectButton.onclick = async () => {
+        if (connectButton.textContent === "Connect Wallet") {
+          ethProvider = getInjectedProvider();
+
+          if (!ethProvider) {
+            alert("No wallet found.");
+            return;
+          }
+
+          try {
+            if (typeof ethProvider.request === "function") {
+              await ethProvider.request({ method: "eth_requestAccounts" });
+            } else if (typeof ethProvider.enable === "function") {
+              await ethProvider.enable();
+            }
+
+            subscribeProviderEvents(ethProvider);
+            await syncConnectedWallet();
+          } catch (error) {
+            console.error(error);
+            status.textContent = "Connection failed: " + (error.message || error);
+            setDisconnectedState();
+          }
+        } else {
+          setDisconnectedState();
+        }
+      };
+
       function readFormValues() {
-        let to = aliasToAddress(toInputEl.value.trim());
-        if (to && !ethers.isAddress(to)) throw new Error("Invalid To address");
+        const to = aliasToAddress(toInputEl.value.trim());
+
+        if (to && !ethers.isAddress(to)) {
+          throw new Error("Invalid To address");
+        }
+
         const data = dataInputEl.value.trim();
         const valueInput = valueInputEl.value.trim();
+
         let valueBig;
         try {
           valueBig = ethers.parseEther(valueInput || "0");
-        } catch {
+        } catch (_) {
           throw new Error("Invalid value");
         }
 
-        const nonceVal = nonceInputEl.value.trim();
+        const nonceValue = nonceInputEl.value.trim();
         let nonceHex = null;
-        if (nonceVal) {
-          const n = parseInt(nonceVal, 10);
-          if (isNaN(n) || n < 0) throw new Error("Invalid nonce");
-          nonceHex = toHex(BigInt(n));
+
+        if (nonceValue) {
+          if (!/^\d+$/.test(nonceValue)) {
+            throw new Error("Invalid nonce");
+          }
+
+          const nonce = BigInt(nonceValue);
+          nonceHex = toHex(nonce);
         }
 
         return { to, data, valueBig, nonceHex };
       }
 
       function getFeeOverrides() {
-        const mpgStr = (mpgInput.value || "").trim();
-        const mfgStr = (mfgInput.value || "").trim();
-        const priority =
-          mpgStr && mpgStr !== "0" ? ethers.parseUnits(mpgStr, "gwei") : null;
-        const maxFee =
-          mfgStr && mfgStr !== "0" ? ethers.parseUnits(mfgStr, "gwei") : null;
-        return { priority, maxFee };
-      }
+        const priorityString = (mpgInput.value || "").trim();
+        const maxFeeString = (mfgInput.value || "").trim();
 
-      function getPrimaryFeeProvider() {
-        return auxRpcProvider || rpcProvider;
+        const priority =
+          priorityString && priorityString !== "0"
+            ? ethers.parseUnits(priorityString, "gwei")
+            : null;
+
+        const maxFee =
+          maxFeeString && maxFeeString !== "0"
+            ? ethers.parseUnits(maxFeeString, "gwei")
+            : null;
+
+        return { priority, maxFee };
       }
 
       async function computeFeePlan(
@@ -331,7 +510,7 @@
         userPriorityWei,
         userMaxFeeWei,
       ) {
-        if (!feeProvider) throw new Error("No RPC provider available");
+        if (!feeProvider) throw new Error("No fee RPC provider available");
 
         let maxPriorityWei = userPriorityWei;
         let maxFeeWei = userMaxFeeWei;
@@ -347,49 +526,61 @@
         } else {
           const historyPromise = feeProvider
             .send("eth_feeHistory", ["0x2", "pending", [10, 20]])
-            .then((res) => {
-              const baseFees = Array.isArray(res?.baseFeePerGas)
-                ? res.baseFeePerGas
+            .then((result) => {
+              const baseFees = Array.isArray(result?.baseFeePerGas)
+                ? result.baseFeePerGas
                 : [];
-              const rewards = Array.isArray(res?.reward) ? res.reward : [];
+              const rewards = Array.isArray(result?.reward)
+                ? result.reward
+                : [];
+
               let baseComponent = null;
-              if (baseFees.length) {
+              if (baseFees.length > 0) {
                 try {
-                  const lastBase = BigInt(baseFees[baseFees.length - 1]);
-                  baseComponent = (lastBase * 125n + 99n) / 100n;
+                  const lastBaseFee = BigInt(baseFees[baseFees.length - 1]);
+                  // Add 25% margin, rounding up.
+                  baseComponent = (lastBaseFee * 125n + 99n) / 100n;
                 } catch (_) {
                   baseComponent = null;
                 }
               }
+
               let priorityCandidate = null;
-              if (rewards.length) {
-                const lastRow = rewards[rewards.length - 1];
-                if (Array.isArray(lastRow) && lastRow.length > 1) {
+              if (rewards.length > 0) {
+                const lastRewardRow = rewards[rewards.length - 1];
+
+                if (
+                  Array.isArray(lastRewardRow) &&
+                  lastRewardRow.length > 1
+                ) {
                   try {
-                    priorityCandidate = BigInt(lastRow[1]);
+                    // 20th-percentile reward from the latest returned row.
+                    priorityCandidate = BigInt(lastRewardRow[1]);
                   } catch (_) {
                     priorityCandidate = null;
                   }
                 }
               }
-              return { base: baseComponent, priority: priorityCandidate };
+
+              return {
+                base: baseComponent,
+                priority: priorityCandidate,
+              };
             })
-            .catch((err) => {
-              console.warn("eth_feeHistory failed", err);
+            .catch((error) => {
+              console.warn("eth_feeHistory failed", error);
               return { base: null, priority: null };
             });
 
           const feeDataPromise = feeProvider
             .getFeeData()
-            .then((fee) => {
-              return {
-                priority: fee.maxPriorityFeePerGas ?? null,
-                maxFee: fee.maxFeePerGas ?? null,
-                gasPrice: fee.gasPrice ?? null,
-              };
-            })
-            .catch((err) => {
-              console.warn("getFeeData failed", err);
+            .then((feeData) => ({
+              priority: feeData.maxPriorityFeePerGas ?? null,
+              maxFee: feeData.maxFeePerGas ?? null,
+              gasPrice: feeData.gasPrice ?? null,
+            }))
+            .catch((error) => {
+              console.warn("getFeeData failed", error);
               return { priority: null, maxFee: null, gasPrice: null };
             });
 
@@ -404,10 +595,13 @@
             historyInfo.priority != null && feeInfo.priority != null
               ? historyInfo.priority - feeInfo.priority
               : null;
+
           const baseDiff =
             historyInfo.base != null && feeInfo.maxFee != null
-              ? historyInfo.base - (feeInfo.maxFee - (feeInfo.priority ?? 0n))
+              ? historyInfo.base -
+                (feeInfo.maxFee - (feeInfo.priority ?? 0n))
               : null;
+
           console.log("수수료 원본 비교", {
             historyPriorityGwei: formatGwei(historyInfo.priority),
             feeDataPriorityGwei: formatGwei(feeInfo.priority),
@@ -420,17 +614,24 @@
 
           if (needAutoPriority) {
             const priorityCandidates = [];
-            if (historyInfo.priority != null)
+
+            if (historyInfo.priority != null) {
               priorityCandidates.push(historyInfo.priority);
-            if (feeInfo.priority != null)
+            }
+
+            if (feeInfo.priority != null) {
               priorityCandidates.push(feeInfo.priority);
+            }
+
             let selectedPriority = null;
-            if (priorityCandidates.length) {
-              selectedPriority = priorityCandidates.reduce((acc, val) =>
-                acc < val ? acc : val,
+            if (priorityCandidates.length > 0) {
+              selectedPriority = priorityCandidates.reduce((current, value) =>
+                current < value ? current : value,
               );
             }
+
             maxPriorityWei = selectedPriority;
+
             console.log("자동 priority 선택", {
               candidateCount: priorityCandidates.length,
               selectedPriorityGwei: formatGwei(selectedPriority),
@@ -438,11 +639,13 @@
           }
 
           let baseComponent = historyInfo.base;
+
           if (baseComponent == null && feeInfo.maxFee != null) {
             const priorityForBase = maxPriorityWei ?? feeInfo.priority;
+
             if (priorityForBase != null) {
-              const derived = feeInfo.maxFee - priorityForBase;
-              if (derived > 0n) baseComponent = derived;
+              const derivedBase = feeInfo.maxFee - priorityForBase;
+              if (derivedBase > 0n) baseComponent = derivedBase;
             }
           }
 
@@ -454,6 +657,7 @@
             } else if (maxPriorityWei != null) {
               maxFeeWei = maxPriorityWei * 2n;
             }
+
             console.log("자동 maxFee 계산", {
               baseComponentGwei: formatGwei(baseComponent),
               selectedMaxFeeGwei: formatGwei(maxFeeWei),
@@ -466,7 +670,7 @@
         if (useEip1559 && maxPriorityWei != null && maxFeeWei != null) {
           if (maxPriorityWei > maxFeeWei) {
             console.warn(
-              "Fee selection: priority exceeds maxFee, clamping priority",
+              "Fee selection: priority exceeds maxFee; clamping priority",
               {
                 priority: maxPriorityWei.toString(),
                 maxFee: maxFeeWei.toString(),
@@ -474,13 +678,15 @@
             );
             maxPriorityWei = maxFeeWei;
           }
+
           console.log("최종 수수료: EIP-1559", {
             maxPriorityFeePerGas: toHex(maxPriorityWei),
             maxFeePerGas: toHex(maxFeeWei),
           });
         } else if (gasPriceWei == null) {
-          const fee = await feeProvider.getFeeData();
-          if (fee.gasPrice) gasPriceWei = fee.gasPrice;
+          const feeData = await feeProvider.getFeeData();
+          if (feeData.gasPrice != null) gasPriceWei = feeData.gasPrice;
+
           console.log("최종 수수료: legacy fallback 재조회", {
             gasPriceGwei: formatGwei(gasPriceWei),
           });
@@ -490,31 +696,42 @@
           });
         }
 
-        return { useEip1559, maxPriorityWei, maxFeeWei, gasPriceWei };
+        return {
+          useEip1559,
+          maxPriorityWei,
+          maxFeeWei,
+          gasPriceWei,
+        };
       }
 
-      async function estimateGasWithMargin(base, provider) {
-        if (!provider) return null;
+      async function estimateGasWithMargin(base, executionProvider) {
+        if (!executionProvider) return null;
+
         try {
-          const gasEstimate = await provider.estimateGas({
+          const gasEstimate = await executionProvider.estimateGas({
             from: base.from,
             to: base.to,
             value: base.value,
             data: base.data ?? "0x",
           });
+
           const gasWithMargin = (gasEstimate * 11n) / 10n;
+
           console.log("가스 추정", {
             estimate: gasEstimate.toString(),
             withMargin: gasWithMargin.toString(),
           });
+
           return toHex(gasWithMargin);
-        } catch (err) {
-          console.warn("Gas estimation failed", err);
+        } catch (error) {
+          console.warn("Gas estimation failed", error);
           return null;
         }
       }
 
-      async function fetchAccessList(base) {
+      async function fetchAccessList(base, executionProvider) {
+        if (!executionProvider) return null;
+
         const params = [
           {
             from: base.from,
@@ -525,54 +742,74 @@
           "latest",
         ];
 
-        if (auxRpcProvider) {
-          const res = await auxRpcProvider.send("eth_createAccessList", params);
-          return res?.accessList ?? null;
-        }
-        if (ethProvider?.request) {
-          const res = await ethProvider.request({
-            method: "eth_createAccessList",
-            params,
-          });
-          return res?.accessList ?? null;
-        }
-        return null;
+        const result = await executionProvider.send(
+          "eth_createAccessList",
+          params,
+        );
+
+        return result?.accessList ?? null;
       }
 
-      async function maybeAttachAccessList(base) {
+      async function maybeAttachAccessList(base, executionProvider) {
         if (base.type !== "0x2" || !base.to) return;
+
         try {
-          const accessList = await fetchAccessList(base);
+          const accessList = await fetchAccessList(base, executionProvider);
           if (!Array.isArray(accessList)) return;
-          const targetAddr = base.to.toLowerCase();
-          const idx = accessList.findIndex(
-            (entry) => (entry.address || "").toLowerCase() === targetAddr,
+
+          const targetAddress = base.to.toLowerCase();
+          const targetIndex = accessList.findIndex(
+            (entry) =>
+              (entry.address || "").toLowerCase() === targetAddress,
           );
-          if (idx !== -1 && accessList[idx].storageKeys.length <= 24) {
-            accessList.splice(idx, 1);
+
+          if (
+            targetIndex !== -1 &&
+            Array.isArray(accessList[targetIndex].storageKeys) &&
+            accessList[targetIndex].storageKeys.length <= 24
+          ) {
+            accessList.splice(targetIndex, 1);
           }
+
           base.accessList = accessList;
-        } catch (err) {
-          console.warn("Access list request failed", err);
+        } catch (error) {
+          console.warn("Access list request failed", error);
         }
       }
 
       async function buildBaseTxParams() {
-        if (!signer || !ethProvider || !rpcProvider || !userAddress)
+        if (!signer || !ethProvider || !rpcProvider || !userAddress) {
           throw new Error("Connect first");
+        }
 
         const formValues = readFormValues();
+        const chainIdHex = await getWalletChainIdHex();
+        const chainId = BigInt(chainIdHex);
+
         const base = {
           from: userAddress,
           to: formValues.to,
           value: toHex(formValues.valueBig),
+          // Always use the chain selected in the connected wallet.
+          chainId: toHex(chainId),
         };
+
         if (formValues.data) base.data = formValues.data;
         if (formValues.nonceHex) base.nonce = formValues.nonceHex;
 
         const { priority, maxFee } = getFeeOverrides();
-        const feeProvider = getPrimaryFeeProvider();
-        const feePlan = await computeFeePlan(feeProvider, priority, maxFee);
+
+        // Fee provider may use the auxiliary RPC only on Ethereum Mainnet.
+        const feeProvider = await selectFeeProvider(chainId);
+
+        // Execution operations must always use the wallet's currently selected chain.
+        const executionProvider = rpcProvider;
+
+        const feePlan = await computeFeePlan(
+          feeProvider,
+          priority,
+          maxFee,
+        );
 
         if (
           feePlan.useEip1559 &&
@@ -586,108 +823,160 @@
           base.gasPrice = toHex(feePlan.gasPriceWei);
         }
 
-        const net = await feeProvider.getNetwork();
-        base.chainId = toHex(net.chainId);
-
-        const gasLimit = await estimateGasWithMargin(base, feeProvider);
+        const gasLimit = await estimateGasWithMargin(
+          base,
+          executionProvider,
+        );
         if (gasLimit) base.gas = gasLimit;
 
-        await maybeAttachAccessList(base);
+        await maybeAttachAccessList(base, executionProvider);
 
-        console.log("최종 txParams", base);
+        console.log("최종 txParams", {
+          chainId: chainId.toString(),
+          feeProvider:
+            feeProvider === auxRpcProvider ? "mainnet auxiliary" : "wallet",
+          txParams: base,
+        });
 
         return base;
       }
 
-      // Send transaction via eth_sendTransaction (unchanged)
+      function getExplorerTxUrl(chainId, txHash) {
+        const explorerBaseUrls = {
+          "1": "https://etherscan.io/tx/",
+          "10": "https://optimistic.etherscan.io/tx/",
+          "56": "https://bscscan.com/tx/",
+          "137": "https://polygonscan.com/tx/",
+          "42161": "https://arbiscan.io/tx/",
+          "43114": "https://snowtrace.io/tx/",
+          "8453": "https://basescan.org/tx/",
+          "11155111": "https://sepolia.etherscan.io/tx/",
+        };
+
+        const baseUrl = explorerBaseUrls[chainId.toString()];
+        return baseUrl ? baseUrl + txHash : null;
+      }
+
       sendButton.onclick = async () => {
-        if (!signer || !ethProvider || !userAddress)
-          return alert("Please connect your wallet first.");
+        if (!signer || !ethProvider || !userAddress) {
+          alert("Please connect your wallet first.");
+          return;
+        }
+
         try {
           const txParams = await buildBaseTxParams();
           console.log("전송 요청 txParams", txParams);
+
           sendButton.disabled = true;
           txStatus.textContent = "Awaiting approval...";
+
           const txHash = await ethProvider.request({
             method: "eth_sendTransaction",
             params: [txParams],
           });
-          txStatus.innerHTML =
-            'Tx hash: <a href="https://etherscan.io/tx/' +
-            txHash +
-            '" target="_blank">' +
-            txHash +
-            "</a>";
-        } catch (err) {
-          console.error(err);
-          txStatus.textContent = "Error: " + (err.message || err);
+
+          const chainId = BigInt(txParams.chainId);
+          const explorerUrl = getExplorerTxUrl(chainId, txHash);
+
+          if (explorerUrl) {
+            const link = document.createElement("a");
+            link.href = explorerUrl;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            link.textContent = txHash;
+
+            txStatus.textContent = "Tx hash: ";
+            txStatus.appendChild(link);
+          } else {
+            txStatus.textContent = `Tx hash: ${txHash}\nChain ID: ${chainId}`;
+          }
+        } catch (error) {
+          console.error(error);
+          txStatus.textContent = "Error: " + (error.message || error);
         } finally {
           sendButton.disabled = false;
         }
       };
 
-      // Sign transaction only (no send)
       signButton.onclick = async () => {
-        if (!signer || !ethProvider || !userAddress)
-          return alert("Please connect your wallet first.");
-        signedBox.style.display = "none";
-        signedOutput.value = "";
-        signedHash.textContent = "";
+        if (!signer || !ethProvider || !userAddress) {
+          alert("Please connect your wallet first.");
+          return;
+        }
+
+        resetSignedOutput();
+
         try {
           const txParams = await buildBaseTxParams();
           console.log("서명 요청 txParams", txParams);
+
           signButton.disabled = true;
           txStatus.textContent = "Requesting signature...";
 
-          let rawResp;
+          let rawResponse;
+
           try {
-            // Preferred: direct RPC (works on Frame/OKX/Rabby; MetaMask may not support)
-            rawResp = await ethProvider.request({
+            // Preferred direct RPC path. MetaMask may not support this method.
+            rawResponse = await ethProvider.request({
               method: "eth_signTransaction",
               params: [txParams],
             });
-          } catch (e1) {
-            // Fallback to signer.signTransaction if available
+          } catch (directSignError) {
             if (signer && typeof signer.signTransaction === "function") {
               const populated = await signer.populateTransaction({
                 ...(txParams.to && { to: txParams.to }),
-                data: txParams.data,
+                ...(txParams.data && { data: txParams.data }),
                 value: txParams.value,
                 ...(txParams.nonce && { nonce: txParams.nonce }),
-                maxFeePerGas: txParams.maxFeePerGas,
-                maxPriorityFeePerGas: txParams.maxPriorityFeePerGas,
-                //gasPrice: txParams.gasPrice,
+                ...(txParams.gas && { gasLimit: txParams.gas }),
+                ...(txParams.maxFeePerGas && {
+                  maxFeePerGas: txParams.maxFeePerGas,
+                }),
+                ...(txParams.maxPriorityFeePerGas && {
+                  maxPriorityFeePerGas: txParams.maxPriorityFeePerGas,
+                }),
+                ...(txParams.gasPrice && { gasPrice: txParams.gasPrice }),
                 type: txParams.type ? Number(txParams.type) : undefined,
-                //chainId: txParams.chainId,
-                accessList: txParams.accessList,
+                chainId: Number(BigInt(txParams.chainId)),
+                ...(txParams.accessList && {
+                  accessList: txParams.accessList,
+                }),
               });
+
               console.log("populateTransaction 결과", populated);
-              if (populated?.gasLimit)
-                console.log("populateTransaction gasLimit", populated.gasLimit);
-              rawResp = await signer.signTransaction(populated);
+              rawResponse = await signer.signTransaction(populated);
             } else {
+              const directMessage =
+                directSignError && directSignError.message
+                  ? directSignError.message + " — "
+                  : "";
+
               throw new Error(
-                e1 && e1.message
-                  ? e1.message +
-                    " — Your wallet may not support sign-only. Try Frame/OKX/Rabby or a wallet that supports eth_signTransaction."
-                  : "Wallet does not support sign-only signing",
+                directMessage +
+                  "Your wallet may not support sign-only. Try Frame/OKX/Rabby or another wallet supporting eth_signTransaction.",
               );
             }
           }
 
-          // Normalize response to hex string
           let rawHex = "";
-          if (typeof rawResp === "string") rawHex = rawResp;
-          else if (rawResp && typeof rawResp === "object")
-            rawHex = rawResp.signedTx || rawResp.raw || rawResp.tx || "";
+
+          if (typeof rawResponse === "string") {
+            rawHex = rawResponse;
+          } else if (rawResponse && typeof rawResponse === "object") {
+            rawHex =
+              rawResponse.signedTx ||
+              rawResponse.raw ||
+              rawResponse.tx ||
+              "";
+          }
+
           if (
             !rawHex ||
             typeof rawHex !== "string" ||
             !rawHex.startsWith("0x")
           ) {
-            // Still show diagnostic but do not crash
             throw new Error(
-              "Wallet returned unexpected format for signed tx. Inspect console.",
+              "Wallet returned an unexpected signed transaction format. Inspect the console.",
             );
           }
 
@@ -698,9 +987,9 @@
           signedBox.style.display = "block";
           txStatus.textContent =
             "Signed only. Save the raw hex to broadcast later.";
-        } catch (err) {
-          console.error(err);
-          txStatus.textContent = "Sign error: " + (err.message || err);
+        } catch (error) {
+          console.error(error);
+          txStatus.textContent = "Sign error: " + (error.message || error);
         } finally {
           signButton.disabled = false;
         }
@@ -709,14 +998,16 @@
       copySigned.onclick = async () => {
         try {
           await navigator.clipboard.writeText(signedOutput.value.trim());
+
           if (!signedHash.textContent) {
             signedHash.textContent = "Copied";
           } else if (!signedHash.textContent.includes(" — Copied")) {
             signedHash.textContent += " — Copied";
           }
-        } catch (_) {}
+        } catch (error) {
+          console.warn("Copy failed", error);
+        }
       };
     </script>
   </body>
 </html>
-
